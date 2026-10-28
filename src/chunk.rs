@@ -14,8 +14,6 @@ pub enum ChunkError {
     InvalidFormat,
 }
 
-const HEADER_SIZE: usize = 12;
-
 #[derive(Debug)]
 pub struct Header {
     signature: [u8; 4],
@@ -147,23 +145,17 @@ impl fmt::Display for ChunkError {
 
 impl Error for ChunkError {}
 
-impl TryFrom<&[u8]> for Header {
-    type Error = ChunkError;
-
-    fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
-        if bytes.len() < HEADER_SIZE {
-            return Err(ChunkError::InvalidFormat);
-        }
-
-        let signature = [bytes[0], bytes[1], bytes[2], bytes[3]];
-        let version = bytes[4];
-        let format = bytes[5];
-        let little_endian = bytes[6] != 0;
-        let int_size = bytes[7];
-        let size_t_size = bytes[8];
-        let instruction_size = bytes[9];
-        let number_size = bytes[10];
-        let integral_numbers = bytes[11] != 0;
+impl Header {
+    fn read_from(r: &mut Reader<'_>) -> Result<Self, ChunkError> {
+        let signature = r.take(4)?.try_into().map_err(|_| ChunkError::InvalidFormat)?;
+        let version = r.read_8()?;
+        let format = r.read_8()?;
+        let little_endian = r.read_8()? != 0;
+        let int_size = r.read_8()?;
+        let size_t_size = r.read_8()?;
+        let instruction_size = r.read_8()?;
+        let number_size = r.read_8()?;
+        let integral_numbers = r.read_8()? != 0;
 
         Ok(Self {
             signature,
@@ -179,25 +171,17 @@ impl TryFrom<&[u8]> for Header {
     }
 }
 
-impl TryFrom<&[u8]> for Prototype {
-    type Error = ChunkError;
-
-    fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
-        Self::read_from(&mut Reader::new(bytes))
-    }
-}
-
 impl Prototype {
-    fn read_from(reader: &mut Reader<'_>) -> Result<Self, ChunkError> {
-        let source = reader.read_string()?;
-        let line_defined = reader.read_32(i32::from_le_bytes)?;
-        let last_line_defined = reader.read_32(i32::from_le_bytes)?;
-        let num_upvalues = reader.read_8()?;
-        let num_parameters = reader.read_8()?;
-        let is_vararg = reader.read_8()?;
-        let max_stack_size = reader.read_8()?;
-        let code = reader.read_vec(|r| r.read_32(u32::from_le_bytes))?;
-        let constants = reader.read_vec(|r| {
+    fn read_from(r: &mut Reader<'_>) -> Result<Self, ChunkError> {
+        let source = r.read_string()?;
+        let line_defined = r.read_32(i32::from_le_bytes)?;
+        let last_line_defined = r.read_32(i32::from_le_bytes)?;
+        let num_upvalues = r.read_8()?;
+        let num_parameters = r.read_8()?;
+        let is_vararg = r.read_8()?;
+        let max_stack_size = r.read_8()?;
+        let code = r.read_vec(|r| r.read_32(u32::from_le_bytes))?;
+        let constants = r.read_vec(|r| {
             let type_byte = r.read_8()?;
             match type_byte {
                 0 => Ok(Constant::Nil),
@@ -216,9 +200,9 @@ impl Prototype {
                 _ => Err(ChunkError::InvalidFormat),
             }
         })?;
-        let prototypes = reader.read_vec(Prototype::read_from)?;
-        let line_info = reader.read_vec(|r| r.read_32(i32::from_le_bytes))?;
-        let locals = reader.read_vec(|r| {
+        let prototypes = r.read_vec(Prototype::read_from)?;
+        let line_info = r.read_vec(|r| r.read_32(i32::from_le_bytes))?;
+        let locals = r.read_vec(|r| {
             let name = r.read_string()?;
             let start_pc = r.read_32(i32::from_le_bytes)?;
             let end_pc = r.read_32(i32::from_le_bytes)?;
@@ -228,7 +212,7 @@ impl Prototype {
                 end_pc,
             })
         })?;
-        let upvalues = reader.read_vec(|r| r.read_string())?;
+        let upvalues = r.read_vec(|r| r.read_string())?;
 
         Ok(Self {
             source,
@@ -251,10 +235,8 @@ impl Prototype {
 impl Chunk {
     // Note: will be tested by integration tests
     pub fn parse(bytes: &[u8]) -> Result<Self, ChunkError> {
-        if bytes.is_empty() {
-            return Err(ChunkError::InvalidFormat);
-        }
-        let header = Header::try_from(bytes)?;
+        let mut r = Reader::new(bytes);
+        let header = Header::read_from(&mut r)?;
         if header.signature != [0x1B, 0x4C, 0x75, 0x61] || header.format != 0x00 {
             return Err(ChunkError::InvalidFormat);
         }
@@ -270,7 +252,7 @@ impl Chunk {
         {
             return Err(ChunkError::InvalidPlatform);
         }
-        let prototype = Prototype::try_from(bytes[HEADER_SIZE..].as_ref())?;
+        let prototype = Prototype::read_from(&mut r)?;
         Ok(Self { header, prototype })
     }
 }
@@ -283,12 +265,12 @@ mod tests {
 
      #[test]
     fn reader_take_advances_only_when_bytes_are_available() {
-        let mut reader = Reader::new(&[1, 2, 3]);
+        let mut r = Reader::new(&[1, 2, 3]);
 
-        assert_eq!(reader.take(2).unwrap(), &[1, 2]);
-        assert!(matches!(reader.take(2), Err(ChunkError::InvalidFormat)));
-        assert_eq!(reader.take(1).unwrap(), &[3]);
-        assert_eq!(reader.take(0).unwrap(), &[]);
+        assert_eq!(r.take(2).unwrap(), &[1, 2]);
+        assert!(matches!(r.take(2), Err(ChunkError::InvalidFormat)));
+        assert_eq!(r.take(1).unwrap(), &[3]);
+        assert_eq!(r.take(0).unwrap(), &[]);
     }
 
     #[test]
@@ -297,34 +279,34 @@ mod tests {
             0x12, 0xEF, 0xCD, 0xAB, 0x90, 0x78, 0x56, 0x34, 0x12, 0, 0, 0, 0,
         ];
         bytes.extend_from_slice(&1.0f64.to_le_bytes());
-        let mut reader = Reader::new(&bytes);
+        let mut r = Reader::new(&bytes);
 
-        assert_eq!(reader.read_8().unwrap(), 0x12);
-        assert_eq!(reader.read_32(u32::from_le_bytes).unwrap(), 0x90AB_CDEF);
+        assert_eq!(r.read_8().unwrap(), 0x12);
+        assert_eq!(r.read_32(u32::from_le_bytes).unwrap(), 0x90AB_CDEF);
         assert_eq!(
-            reader.read_64(u64::from_le_bytes).unwrap(),
+            r.read_64(u64::from_le_bytes).unwrap(),
             0x0000_0000_1234_5678
         );
-        assert_eq!(reader.read_64(f64::from_le_bytes).unwrap(), 1.0);
-        assert!(matches!(reader.read_8(), Err(ChunkError::InvalidFormat)));
+        assert_eq!(r.read_64(f64::from_le_bytes).unwrap(), 1.0);
+        assert!(matches!(r.read_8(), Err(ChunkError::InvalidFormat)));
     }
 
     #[test]
     fn reader_decodes_strings_and_rejects_invalid_strings() {
         let bytes = [0, 0, 0, 0, 2, 0, 0, 0, b'x', 0];
-        let mut reader = Reader::new(&bytes);
+        let mut r = Reader::new(&bytes);
 
-        assert_eq!(reader.read_string().unwrap(), None);
-        assert_eq!(reader.read_string().unwrap().as_deref(), Some("x"));
+        assert_eq!(r.read_string().unwrap(), None);
+        assert_eq!(r.read_string().unwrap().as_deref(), Some("x"));
 
         for bytes in [
             &[1, 0, 0, 0, b'x'][..],
             &[2, 0, 0, 0, 0xFF, 0],
             &[2, 0, 0, 0, b'x'],
         ] {
-            let mut reader = Reader::new(bytes);
+            let mut r = Reader::new(bytes);
             assert!(matches!(
-                reader.read_string(),
+                r.read_string(),
                 Err(ChunkError::InvalidFormat)
             ));
         }
@@ -333,20 +315,20 @@ mod tests {
     #[test]
     fn reader_decodes_vectors_and_rejects_invalid_lengths_or_elements() {
         let bytes = [2, 0, 0, 0, 7, 8];
-        let mut reader = Reader::new(&bytes);
-        assert_eq!(reader.read_vec(|reader| reader.read_8()).unwrap(), [7, 8]);
+        let mut r = Reader::new(&bytes);
+        assert_eq!(r.read_vec(|r| r.read_8()).unwrap(), [7, 8]);
 
         let negative_length = (-1i32).to_le_bytes();
-        let mut reader = Reader::new(&negative_length);
+        let mut r = Reader::new(&negative_length);
         assert!(matches!(
-            reader.read_vec(|reader| reader.read_8()),
+            r.read_vec(|r| r.read_8()),
             Err(ChunkError::InvalidFormat)
         ));
 
         let truncated_element = [1, 0, 0, 0];
-        let mut reader = Reader::new(&truncated_element);
+        let mut r = Reader::new(&truncated_element);
         assert!(matches!(
-            reader.read_vec(|reader| reader.read_32(u32::from_le_bytes)),
+            r.read_vec(|r| r.read_32(u32::from_le_bytes)),
             Err(ChunkError::InvalidFormat)
         ));
     }
@@ -375,7 +357,8 @@ mod tests {
         bytes.extend_from_slice(&7i32.to_le_bytes());
         bytes.extend_from_slice(&0i32.to_le_bytes());
 
-        let prototype = Prototype::try_from(bytes.as_slice()).unwrap();
+        let mut r = Reader::new(&bytes);
+        let prototype = Prototype::read_from(&mut r).unwrap();
 
         assert_eq!(prototype.constants.len(), 4);
         assert!(matches!(prototype.constants[0], Constant::Nil));
@@ -394,12 +377,13 @@ mod tests {
 
     #[test]
     fn header_decodes_its_fields() {
-        let bytes = [0x1B, 0x4C, 0x75, 0x61, 0x51, 0x02, 0x01, 4, 4, 4, 8, 0];
-        let header = Header::try_from(&bytes[..]).unwrap();
+        let bytes = [0x1B, 0x4C, 0x75, 0x61, 0x51, 0x00, 0x01, 4, 4, 4, 8, 0];
+        let mut r = Reader::new(&bytes);
+        let header = Header::read_from(&mut r).unwrap();
 
         assert_eq!(header.signature, [0x1B, 0x4C, 0x75, 0x61]);
         assert_eq!(header.version, 0x51);
-        assert_eq!(header.format, 0x02);
+        assert_eq!(header.format, 0x00);
         assert!(header.little_endian);
         assert_eq!(
             (
@@ -411,14 +395,6 @@ mod tests {
             (4, 4, 4, 8)
         );
         assert!(!header.integral_numbers);
-    }
-
-    #[test]
-    fn header_rejects_insufficient_input() {
-        assert!(matches!(
-            Header::try_from(&[0; HEADER_SIZE - 1][..]),
-            Err(ChunkError::InvalidFormat)
-        ));
     }
 
     #[test]
